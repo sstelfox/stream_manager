@@ -5,7 +5,7 @@ authors = ["Sam Stelfox <sstelfox@bedroomprogrammers.net>"]
 
 [dependencies]
 actix = "^0.5"
-actix-web = { version = "^0.6", default-features = false }
+actix-web = { version = "^0.6", default-features = false, features = ["session"] }
 
 dotenv = { version = "^0.13", default-features = false }
 env_logger = "^0.5"

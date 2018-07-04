@@ -7,6 +7,7 @@ extern crate env_logger;
 extern crate log;
 
 use actix_web::{http, middleware, server, App, HttpRequest};
+use actix_web::middleware::session::{SessionStorage, CookieSessionBackend};
 use dotenv::dotenv;
 
 fn index(_req: HttpRequest<AppState>) -> &'static str {
@@ -38,6 +39,9 @@ fn main() {
             let cloned_state = state.clone();
             App::with_state(cloned_state)
                 .middleware(middleware::Logger::default())
+                .middleware(
+                    SessionStorage::new(CookieSessionBackend::private(&[0; 32]).secure(false))
+                )
                 .resource("/", |r| r.method(http::Method::GET).with(index))
                 .resource("/oauth/callback", |r| r.method(http::Method::GET).with(oauth_callback))
         })
