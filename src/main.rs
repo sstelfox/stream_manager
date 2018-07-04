@@ -7,15 +7,32 @@ extern crate env_logger;
 extern crate log;
 
 use actix_web::{http, middleware, server, App, HttpRequest};
-use actix_web::middleware::session::{SessionStorage, CookieSessionBackend};
+use actix_web::middleware::session::{CookieSessionBackend, SessionStorage, RequestSession};
 use dotenv::dotenv;
 
-fn index(_req: HttpRequest<AppState>) -> &'static str {
-    "First page"
+fn index(req: HttpRequest<AppState>) -> &'static str {
+    match req.session().get::<String>("sid") {
+        Ok(value) => {
+            match value {
+                Some(session_id) => {
+                    info!("User had session ID value of: {}", session_id);
+                }
+                _ => {
+                    req.session().set("sid", "weeooo")
+                        .expect("Unable to set SID");
+                }
+            }
+        }
+        _ => {
+            error!("Unable to get session value");
+        }
+    }
+
+    "First page\n"
 }
 
 fn oauth_callback(_req: HttpRequest<AppState>) -> &'static str {
-    "{\"status\": \"ok\"}"
+    "{\"status\": \"ok\"}\n"
 }
 
 #[derive(Clone)]
