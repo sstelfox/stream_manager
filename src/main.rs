@@ -32,13 +32,31 @@ fn index(req: HttpRequest<AppState>) -> &'static str {
     "First page\n"
 }
 
-fn login_redirect(_req: HttpRequest<AppState>) -> Result<HttpResponse> {
+fn login_redirect(req: HttpRequest<AppState>) -> Result<HttpResponse> {
     // TODO: Check if the user is already logged in and choose to redirect them to a reasonable
     // logged in path instead of doing this
 
+    // TODO: Make this URL safe
+    let callback_url = "http://stream-manager.tunnels.stelfox.net/oauth/callback";
+
+    // TODO: Generate nonce correctly
+    let nonce = "abcdefghijklmnopqrstuvwxyz";
+
+    // TODO: Generate a signed websafe base 64, should include timestamp and
+    // user's session ID. Could just be encrypted AEAD preferred.
+    let state = "signed-data";
+
     // TODO: Build URL
+    let auth_url = format!(
+        "https://id.twitch.tv/oauth2/authorize?client_id={}&nonce={}&redirect_uri={}&response_type=code&scope=openid+channel_editor+chat_login&state={}",
+        req.state().twitch_client_id,
+        nonce,
+        callback_url,
+        state,
+    );
+
     Ok(HttpResponse::Found()
-        .header(header::LOCATION, "https://id.twitch.tv/...")
+        .header(header::LOCATION, auth_url)
         .finish())
 }
 
@@ -85,7 +103,10 @@ fn main() {
             )
             .resource("/", |r| r.method(http::Method::GET).with(index))
             .resource("/login", |r| r.method(http::Method::GET).with(login_redirect))
-            .resource("/oauth/callback", |r| r.method(http::Method::GET).with(oauth_callback))
+            .resource("/oauth/callback", |r| {
+                r.name("callback");
+                r.method(http::Method::GET).with(oauth_callback);
+            })
     })
         .keep_alive(30)
         .bind("127.0.0.1:9292")
