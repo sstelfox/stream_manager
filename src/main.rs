@@ -2,6 +2,9 @@ extern crate actix;
 extern crate actix_web;
 extern crate dotenv;
 extern crate env_logger;
+extern crate hyper;
+extern crate rand;
+extern crate url;
 
 #[macro_use]
 extern crate log;
@@ -10,6 +13,8 @@ use actix_web::http::{self, header};
 use actix_web::{middleware, server, App, HttpResponse, HttpRequest, Result};
 use actix_web::middleware::session::{CookieSessionBackend, SessionStorage, RequestSession};
 use dotenv::dotenv;
+use url::Url;
+use rand::prelude::*;
 
 fn index(req: HttpRequest<AppState>) -> &'static str {
     match req.session().get::<String>("sid") {
@@ -36,27 +41,24 @@ fn login_redirect(req: HttpRequest<AppState>) -> Result<HttpResponse> {
     // TODO: Check if the user is already logged in and choose to redirect them to a reasonable
     // logged in path instead of doing this
 
-    // TODO: Make this URL safe
     let callback_url = req.url_for_static("callback")?;
 
-    // TODO: Generate nonce correctly
-    let nonce = "abcdefghijklmnopqrstuvwxyz";
+    let nonce: String = rand::thread_rng().sample_iter(&rand::distributions::Alphanumeric).take(12).collect();
+    // TODO: Need to handle this failure potential
+    req.session().set("auth_nonce", nonce.clone())?;
 
     // TODO: Generate a signed websafe base 64, should include timestamp and
     // user's session ID. Could just be encrypted AEAD preferred.
     let state = "signed-data";
 
-    // TODO: Build URL
-    let auth_url = format!(
-        "https://id.twitch.tv/oauth2/authorize?client_id={}&nonce={}&redirect_uri={}&response_type=code&scope=openid+channel_editor+chat_login&state={}",
-        req.state().twitch_client_id,
-        nonce,
-        callback_url.as_str(),
-        state,
-    );
+    let auth_url = Url::parse_with_params("https://id.twitch.tv/oauth2/authorize",
+        &[("client_id", req.state().twitch_client_id.clone()), ("nonce", nonce.to_string()),
+          ("redirect_uri", callback_url.as_str().to_string()), ("response_type", "code".to_string()),
+          ("scope", "openid channel_editor chat_login".to_string()), ("state", state.to_string())]
+      )?;
 
     Ok(HttpResponse::Found()
-        .header(header::LOCATION, auth_url)
+        .header(header::LOCATION, auth_url.as_str())
         .finish())
 }
 
