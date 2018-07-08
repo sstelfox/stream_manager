@@ -6,7 +6,8 @@ extern crate env_logger;
 #[macro_use]
 extern crate log;
 
-use actix_web::{http, middleware, server, App, HttpRequest};
+use actix_web::http::{self, header};
+use actix_web::{middleware, server, App, HttpResponse, HttpRequest, Result};
 use actix_web::middleware::session::{CookieSessionBackend, SessionStorage, RequestSession};
 use dotenv::dotenv;
 
@@ -31,16 +32,32 @@ fn index(req: HttpRequest<AppState>) -> &'static str {
     "First page\n"
 }
 
+fn login_redirect(_req: HttpRequest<AppState>) -> Result<HttpResponse> {
+    // TODO: Check if the user is already logged in and choose to redirect them to a reasonable
+    // logged in path instead of doing this
+
+    // TODO: Build URL
+    Ok(HttpResponse::Found()
+        .header(header::LOCATION, "https://id.twitch.tv/...")
+        .finish())
+}
+
 fn oauth_callback(_req: HttpRequest<AppState>) -> &'static str {
     "{\"status\": \"ok\"}\n"
 }
 
-#[derive(Clone)]
-struct AppState;
+#[derive(Clone, Debug)]
+struct AppState {
+    twitch_client_id: String,
+    twitch_client_secret: String,
+}
 
 impl AppState {
-    fn new() -> AppState {
-        AppState {}
+    fn from_env() -> AppState {
+        AppState {
+            twitch_client_id: std::env::var("TWITCH_OAUTH_CLIENT_ID").unwrap(),
+            twitch_client_secret: std::env::var("TWITCH_OAUTH_CLIENT_SECRET").unwrap(),
+        }
     }
 }
 
@@ -49,7 +66,7 @@ fn main() {
     env_logger::init();
 
     let session_key = std::env::var("COOKIE_SESSION_KEY").unwrap();
-    let state = AppState::new();
+    let state = AppState::from_env();
 
     let sys = actix::System::new("stream_manager");
 
@@ -67,6 +84,7 @@ fn main() {
                 )
             )
             .resource("/", |r| r.method(http::Method::GET).with(index))
+            .resource("/login", |r| r.method(http::Method::GET).with(login_redirect))
             .resource("/oauth/callback", |r| r.method(http::Method::GET).with(oauth_callback))
     })
         .keep_alive(30)
