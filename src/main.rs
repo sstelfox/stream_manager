@@ -48,20 +48,27 @@ fn main() {
     dotenv().ok();
     env_logger::init();
 
+    let session_key = std::env::var("COOKIE_SESSION_KEY").unwrap();
+    let state = AppState::new();
+
     let sys = actix::System::new("stream_manager");
 
-    let state = AppState::new();
-    server::new(
-        move || {
-            let cloned_state = state.clone();
-            App::with_state(cloned_state)
-                .middleware(middleware::Logger::default())
-                .middleware(
-                    SessionStorage::new(CookieSessionBackend::private(&[0; 32]).secure(false))
+    server::new(move || {
+        let cloned_state = state.clone();
+
+        App::with_state(cloned_state)
+            .middleware(middleware::Logger::default())
+            .middleware(
+                SessionStorage::new(
+                    CookieSessionBackend::private(session_key.as_bytes())
+                        .name("sm_ses")
+                        // Should be true in production
+                        .secure(false)
                 )
-                .resource("/", |r| r.method(http::Method::GET).with(index))
-                .resource("/oauth/callback", |r| r.method(http::Method::GET).with(oauth_callback))
-        })
+            )
+            .resource("/", |r| r.method(http::Method::GET).with(index))
+            .resource("/oauth/callback", |r| r.method(http::Method::GET).with(oauth_callback))
+    })
         .keep_alive(30)
         .bind("127.0.0.1:9292")
         .unwrap()
