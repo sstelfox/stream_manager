@@ -37,7 +37,7 @@ fn login_redirect(req: HttpRequest<AppState>) -> Result<HttpResponse> {
     // logged in path instead of doing this
 
     // TODO: Make this URL safe
-    let callback_url = "http://stream-manager.tunnels.stelfox.net/oauth/callback";
+    let callback_url = req.url_for_static("callback")?;
 
     // TODO: Generate nonce correctly
     let nonce = "abcdefghijklmnopqrstuvwxyz";
@@ -51,7 +51,7 @@ fn login_redirect(req: HttpRequest<AppState>) -> Result<HttpResponse> {
         "https://id.twitch.tv/oauth2/authorize?client_id={}&nonce={}&redirect_uri={}&response_type=code&scope=openid+channel_editor+chat_login&state={}",
         req.state().twitch_client_id,
         nonce,
-        callback_url,
+        callback_url.as_str(),
         state,
     );
 
