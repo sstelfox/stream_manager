@@ -15,7 +15,7 @@ extern crate log;
 extern crate serde_derive;
 
 use actix_web::http::{self, header};
-use actix_web::{middleware, server, App, HttpResponse, HttpRequest, Query, Result};
+use actix_web::{middleware, server, App, HttpResponse, HttpRequest, Query, Result, State};
 use actix_web::middleware::session::{CookieSessionBackend, SessionStorage, RequestSession};
 use dotenv::dotenv;
 use url::Url;
@@ -107,19 +107,36 @@ struct CallbackInfo {
     success: Option<CallbackSuccess>,
 }
 
-fn oauth_callback(data: Query<CallbackInfo>) -> Result<HttpResponse> {
-    if data.error.is_some() {
+fn oauth_callback(data: (Query<CallbackInfo>, State<AppState>)) -> Result<HttpResponse> {
+    let (callback, state) = data;
+
+    // Definitely need to handle errors here...
+    let mut enc_data = base64::decode_config(&callback.state, base64::URL_SAFE_NO_PAD).unwrap();
+
+    let raw_key = state.session_key.as_bytes();
+    let opening_key = aead::OpeningKey::new(&aead::CHACHA20_POLY1305, &raw_key[..]).unwrap();
+
+    // TODO: I need to transfer the generated nonce in the state
+    let nonce = vec![0, 12];
+    let additional_data: [u8; 0] = [];
+
+    // Definitely handle errors here as well...
+    let _decrypted_state = aead::open_in_place(&opening_key, &nonce, &additional_data, 0, &mut enc_data).unwrap();
+
+    // Need to compare state contents
+
+    if callback.error.is_some() {
         // TODO: Make this an error
         return Ok(HttpResponse::Ok().body("You didn't grant us permission"));
     }
 
-    if data.success.is_some() {
+    if callback.success.is_some() {
         // Continue handling the request
         return Ok(HttpResponse::Ok().body("Everything is all right"));
     }
 
     // TODO: This was a bad request
-    Ok(HttpResponse::Ok().body("bad request").finish())
+    Ok(HttpResponse::Ok().body("bad request"))
 }
 
 #[derive(Clone, Debug)]
