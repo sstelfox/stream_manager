@@ -85,30 +85,41 @@ fn login_redirect(req: HttpRequest<AppState>) -> Result<HttpResponse> {
 }
 
 #[derive(Debug, Deserialize)]
-struct CallbackInfo {
-    // Error fields
-
-    #[serde(default)]
-    error: Option<String>,
-
-    #[serde(default)]
-    error_description: Option<String>,
-
-    // Success fields
-
-    #[serde(default)]
-    code: Option<String>,
-
-    #[serde(default)]
-    scope: Option<String>,
-
-    // Always present
-
-    state: String,
+struct CallbackError {
+    error: String,
+    error_description: String,
 }
 
-fn oauth_callback(_data: Query<CallbackInfo>) -> Result<HttpResponse> {
-    Ok(HttpResponse::Ok().finish())
+#[derive(Debug, Deserialize)]
+struct CallbackSuccess {
+    code: String,
+    scope: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CallbackInfo {
+    state: String,
+
+    #[serde(default, flatten)]
+    error: Option<CallbackError>,
+
+    #[serde(default, flatten)]
+    success: Option<CallbackSuccess>,
+}
+
+fn oauth_callback(data: Query<CallbackInfo>) -> Result<HttpResponse> {
+    if data.error.is_some() {
+        // TODO: Make this an error
+        return Ok(HttpResponse::Ok().body("You didn't grant us permission"));
+    }
+
+    if data.success.is_some() {
+        // Continue handling the request
+        return Ok(HttpResponse::Ok().body("Everything is all right"));
+    }
+
+    // TODO: This was a bad request
+    Ok(HttpResponse::Ok().body("bad request").finish())
 }
 
 #[derive(Clone, Debug)]
