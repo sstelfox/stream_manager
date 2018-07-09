@@ -11,10 +11,12 @@ dotenv = { version = "0.13", default-features = false }
 env_logger = "0.5"
 log = "0.4"
 
+base64 = "0.9"
 serde = "1.0"
 serde_derive = "1.0"
 serde_json = "1.0"
 
 rand = "0.5"
+ring = "0.12"
 url = "1.7"
 hyper = "0.12"
