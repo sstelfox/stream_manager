@@ -11,8 +11,11 @@ extern crate url;
 #[macro_use]
 extern crate log;
 
+#[macro_use]
+extern crate serde_derive;
+
 use actix_web::http::{self, header};
-use actix_web::{middleware, server, App, HttpResponse, HttpRequest, Result};
+use actix_web::{middleware, server, App, HttpResponse, HttpRequest, Query, Result};
 use actix_web::middleware::session::{CookieSessionBackend, SessionStorage, RequestSession};
 use dotenv::dotenv;
 use url::Url;
@@ -81,8 +84,31 @@ fn login_redirect(req: HttpRequest<AppState>) -> Result<HttpResponse> {
         .finish())
 }
 
-fn oauth_callback(_req: HttpRequest<AppState>) -> &'static str {
-    "{\"status\": \"ok\"}\n"
+#[derive(Debug, Deserialize)]
+struct CallbackInfo {
+    // Error fields
+
+    #[serde(default)]
+    error: Option<String>,
+
+    #[serde(default)]
+    error_description: Option<String>,
+
+    // Success fields
+
+    #[serde(default)]
+    code: Option<String>,
+
+    #[serde(default)]
+    scope: Option<String>,
+
+    // Always present
+
+    state: String,
+}
+
+fn oauth_callback(_data: Query<CallbackInfo>) -> Result<HttpResponse> {
+    Ok(HttpResponse::Ok().finish())
 }
 
 #[derive(Clone, Debug)]
