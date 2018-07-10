@@ -66,14 +66,17 @@ fn login_redirect(req: HttpRequest<AppState>) -> Result<HttpResponse> {
     let rand = SystemRandom::new();
     rand.fill(&mut nonce).unwrap();
 
-    // TODO: also need to base64 encode the nonce, will separate the two with a period
+    let encoded_nonce = base64::encode_config(&nonce, base64::URL_SAFE_NO_PAD);
 
     // Generate the key we're going to use for sealing
     let raw_key = req.state().session_key.as_bytes();
     let sealing_key = aead::SealingKey::new(&aead::CHACHA20_POLY1305, &raw_key[..]).unwrap();
 
     aead::seal_in_place(&sealing_key, &nonce, &additional_data, &mut state, aead::CHACHA20_POLY1305.tag_len()).unwrap();
-    let safe_state = base64::encode_config(&state, base64::URL_SAFE_NO_PAD);
+    let safe_state = vec![
+        encoded_nonce,
+        base64::encode_config(&state, base64::URL_SAFE_NO_PAD),
+    ].join(".");
 
     let auth_url = Url::parse_with_params("https://id.twitch.tv/oauth2/authorize",
         &[("client_id", req.state().twitch_client_id.clone()), ("nonce", auth_nonce.to_string()),
@@ -110,35 +113,48 @@ struct CallbackInfo {
 }
 
 fn oauth_callback(data: (Query<CallbackInfo>, State<AppState>)) -> Result<HttpResponse> {
-    let (callback, state) = data;
+    let (callback, app_state) = data;
+
+    let state_components: Vec<&str> = callback.state.split(".").collect();
+    if state_components.len() != 2 {
+        // This is an invalid state, we didn't generate it
+        return Ok(HttpResponse::BadRequest().body("This was a bad request. Bad user.\n"));
+    }
+
+    let nonce = base64::decode_config(&state_components[0], base64::URL_SAFE_NO_PAD).unwrap();
 
     // Definitely need to handle errors here...
-    let mut enc_data = base64::decode_config(&callback.state, base64::URL_SAFE_NO_PAD).unwrap();
+    let mut enc_data = base64::decode_config(&state_components[1], base64::URL_SAFE_NO_PAD).unwrap();
 
-    let raw_key = state.session_key.as_bytes();
+    let raw_key = app_state.session_key.as_bytes();
     let opening_key = aead::OpeningKey::new(&aead::CHACHA20_POLY1305, &raw_key[..]).unwrap();
-
-    // TODO: I need to transfer the generated nonce in the state
-    let nonce = vec![0, 12];
     let additional_data: [u8; 0] = [];
 
     // Definitely handle errors here as well...
-    let _decrypted_state = aead::open_in_place(&opening_key, &nonce, &additional_data, 0, &mut enc_data).unwrap();
+    let decrypted_state = aead::open_in_place(&opening_key, &nonce, &additional_data, 0, &mut enc_data).unwrap();
+    let state_string = std::str::from_utf8(decrypted_state).unwrap();
 
-    // Need to compare state contents
+    // TODO: when this state is meaningful I should do a better check. This is still useful as it
+    // stands now.
+    if state_string != "signed-data" {
+        // This was malformed, the decryption should have caught any modifications. Replays are
+        // possible, but the internal contents should eventually have timestamp and user's session
+        // ID in.
+        return Ok(HttpResponse::BadRequest().body("This was a bad request. Bad user.\n"));
+    }
 
     if callback.error.is_some() {
-        return Ok(HttpResponse::Unauthorized().body("You didn't grant us permission"));
+        return Ok(HttpResponse::Unauthorized().body("You didn't grant us permission\n"));
     }
 
     if callback.success.is_some() {
         // Continue handling the request, for now we'll end the back and forth here.
-        return Ok(HttpResponse::Ok().body("Everything is all right"));
+        return Ok(HttpResponse::Ok().body("Everything is all right\n"));
     }
 
     // This was neither an error or a success, but had at least a 'state' attribute otherwise this
     // handler wouldn't have been called at all.
-    Ok(HttpResponse::BadRequest().body("This was a bad request. Bad user."))
+    Ok(HttpResponse::BadRequest().body("This was a bad request. Bad user.\n"))
 }
 
 #[derive(Clone, Debug)]
