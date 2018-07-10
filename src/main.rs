@@ -22,6 +22,8 @@ use url::Url;
 use rand::prelude::*;
 use ring::aead;
 use ring::rand::{SecureRandom, SystemRandom};
+use std::error::Error;
+use std::fmt;
 
 fn index(req: HttpRequest<AppState>) -> &'static str {
     match req.session().get::<String>("sid") {
@@ -112,31 +114,91 @@ struct CallbackInfo {
     success: Option<CallbackSuccess>,
 }
 
+#[derive(Debug)]
+enum OAuthError {
+    IncorrectComponentCount(usize),
+
+    // TODO could probably collect this more specific error on all of these
+    InvalidBase64,
+    InvalidStateKey,
+    DecryptionFailure,
+    InvalidContent,
+}
+
+impl Error for OAuthError {
+    fn description(&self) -> &str {
+        use self::OAuthError::*;
+
+        match *self {
+            IncorrectComponentCount(_) => "returned state component had an incorrect number of entries",
+            InvalidBase64 => "part of the state had invalid web safe base64",
+            InvalidStateKey => "an error occurred generating the key for the state",
+            DecryptionFailure => "failed to properly decrypt the state",
+            InvalidContent => "decrypted content wasn't good",
+        }
+    }
+}
+
+impl fmt::Display for OAuthError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use self::OAuthError::*;
+
+        match *self {
+            IncorrectComponentCount(count) => write!(f, "Returned state had {} components instead of the expected 2", count),
+            InvalidBase64 => write!(f, "One of the returned state components wasn't valid web-base64"),
+            _ => write!(f, "A weird OAuth error occurred: {}", self.description()),
+        }
+    }
+}
+
+fn decrypt_callback_state(state: &str, key: &[u8]) -> Result<String, OAuthError> {
+    let components: Vec<&str> = state.split(".").collect();
+    if components.len() != 2 {
+        // This app apparently didn't generate the returned state as it has the wrong number of
+        // components. There could be a couple of reasons for this, most likely something broke on
+        // Twitch's end. Someone could also be enumerating the endpoint to see happens with
+        // different changes...
+        return Err(OAuthError::IncorrectComponentCount(components.len()));
+    }
+
+    let nonce = match base64::decode_config(&components[0], base64::URL_SAFE_NO_PAD) {
+        Ok(nonce) => nonce,
+        Err(_) => return Err(OAuthError::InvalidBase64),
+    };
+
+    let mut enc_data = match base64::decode_config(&components[1], base64::URL_SAFE_NO_PAD) {
+        Ok(enc_data) => enc_data,
+        Err(_) => return Err(OAuthError::InvalidBase64),
+    };
+
+    // TODO: This needs to be more specific
+    let opening_key = match aead::OpeningKey::new(&aead::CHACHA20_POLY1305, &key[..]) {
+        Ok(key) => key,
+        Err(_) => return Err(OAuthError::InvalidStateKey),
+    };
+
+    // Unused but mandatory
+    let additional_data: [u8; 0] = [];
+
+    let decrypted_state = match aead::open_in_place(&opening_key, &nonce, &additional_data, 0, &mut enc_data) {
+        Ok(state) => state,
+        Err(_) => return Err(OAuthError::DecryptionFailure),
+    };
+
+    match std::str::from_utf8(decrypted_state) {
+        Ok(state) => return Ok(String::from(state)),
+        Err(_) => return Err(OAuthError::InvalidContent),
+    };
+}
+
 fn oauth_callback(data: (Query<CallbackInfo>, State<AppState>)) -> Result<HttpResponse> {
     let (callback, app_state) = data;
 
-    let state_components: Vec<&str> = callback.state.split(".").collect();
-    if state_components.len() != 2 {
-        // This is an invalid state, we didn't generate it
-        return Ok(HttpResponse::BadRequest().body("This was a bad request. Bad user.\n"));
-    }
-
-    let nonce = base64::decode_config(&state_components[0], base64::URL_SAFE_NO_PAD).unwrap();
-
-    // Definitely need to handle errors here...
-    let mut enc_data = base64::decode_config(&state_components[1], base64::URL_SAFE_NO_PAD).unwrap();
-
-    let raw_key = app_state.session_key.as_bytes();
-    let opening_key = aead::OpeningKey::new(&aead::CHACHA20_POLY1305, &raw_key[..]).unwrap();
-    let additional_data: [u8; 0] = [];
-
-    // Definitely handle errors here as well...
-    let decrypted_state = aead::open_in_place(&opening_key, &nonce, &additional_data, 0, &mut enc_data).unwrap();
-    let state_string = std::str::from_utf8(decrypted_state).unwrap();
+    let state_string = decrypt_callback_state(&callback.state, app_state.session_key.as_bytes());
 
     // TODO: when this state is meaningful I should do a better check. This is still useful as it
     // stands now.
-    if state_string != "signed-data" {
+    if state_string.unwrap() != "signed-data" {
         // This was malformed, the decryption should have caught any modifications. Replays are
         // possible, but the internal contents should eventually have timestamp and user's session
         // ID in.
