@@ -66,6 +66,8 @@ fn login_redirect(req: HttpRequest<AppState>) -> Result<HttpResponse> {
     let rand = SystemRandom::new();
     rand.fill(&mut nonce).unwrap();
 
+    // TODO: also need to base64 encode the nonce, will separate the two with a period
+
     // Generate the key we're going to use for sealing
     let raw_key = req.state().session_key.as_bytes();
     let sealing_key = aead::SealingKey::new(&aead::CHACHA20_POLY1305, &raw_key[..]).unwrap();
@@ -126,17 +128,17 @@ fn oauth_callback(data: (Query<CallbackInfo>, State<AppState>)) -> Result<HttpRe
     // Need to compare state contents
 
     if callback.error.is_some() {
-        // TODO: Make this an error
-        return Ok(HttpResponse::Ok().body("You didn't grant us permission"));
+        return Ok(HttpResponse::Unauthorized().body("You didn't grant us permission"));
     }
 
     if callback.success.is_some() {
-        // Continue handling the request
+        // Continue handling the request, for now we'll end the back and forth here.
         return Ok(HttpResponse::Ok().body("Everything is all right"));
     }
 
-    // TODO: This was a bad request
-    Ok(HttpResponse::Ok().body("bad request"))
+    // This was neither an error or a success, but had at least a 'state' attribute otherwise this
+    // handler wouldn't have been called at all.
+    Ok(HttpResponse::BadRequest().body("This was a bad request. Bad user."))
 }
 
 #[derive(Clone, Debug)]
