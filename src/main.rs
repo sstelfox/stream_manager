@@ -71,6 +71,9 @@ fn login_redirect(req: HttpRequest<AppState>) -> Result<HttpResponse> {
 
     // Generate the key we're going to use for sealing
     let raw_key = req.state().session_key.as_bytes();
+
+    encrypt_callback_state(&String::from("signed-data"), &raw_key.clone(), auth_nonce.clone().as_bytes()).unwrap();
+
     let sealing_key = aead::SealingKey::new(&aead::CHACHA20_POLY1305, &raw_key[..]).unwrap();
 
     aead::seal_in_place(&sealing_key, &nonce, &[], &mut state, aead::CHACHA20_POLY1305.tag_len()).unwrap();
@@ -186,6 +189,10 @@ fn decrypt_callback_state(state: &str, key: &[u8]) -> Result<String, OAuthError>
         Ok(state) => return Ok(String::from(state)),
         Err(_) => return Err(OAuthError::InvalidContent),
     };
+}
+
+fn encrypt_callback_state(_state: &str, _key: &[u8], _nonce: &[u8]) -> Result<String, OAuthError> {
+    Ok(String::from("testing"))
 }
 
 fn oauth_callback(data: (Query<CallbackInfo>, State<AppState>)) -> Result<HttpResponse> {
