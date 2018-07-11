@@ -22,6 +22,7 @@ use url::Url;
 use rand::prelude::*;
 use ring::aead;
 use ring::rand::{SecureRandom, SystemRandom};
+use std::convert::From;
 use std::error::Error;
 use std::fmt;
 
@@ -61,8 +62,6 @@ fn login_redirect(req: HttpRequest<AppState>) -> Result<HttpResponse> {
     // Need to make room for the signature in the structure
     for _ in 0..aead::CHACHA20_POLY1305.tag_len() { state.push(0); }
 
-    let additional_data: [u8; 0] = [];
-
     // Generate a fresh encryption nonce, this must be separate from the auth_nonce
     let mut nonce = vec![0; 12];
     let rand = SystemRandom::new();
@@ -74,7 +73,7 @@ fn login_redirect(req: HttpRequest<AppState>) -> Result<HttpResponse> {
     let raw_key = req.state().session_key.as_bytes();
     let sealing_key = aead::SealingKey::new(&aead::CHACHA20_POLY1305, &raw_key[..]).unwrap();
 
-    aead::seal_in_place(&sealing_key, &nonce, &additional_data, &mut state, aead::CHACHA20_POLY1305.tag_len()).unwrap();
+    aead::seal_in_place(&sealing_key, &nonce, &[], &mut state, aead::CHACHA20_POLY1305.tag_len()).unwrap();
     let safe_state = vec![
         encoded_nonce,
         base64::encode_config(&state, base64::URL_SAFE_NO_PAD),
@@ -119,9 +118,9 @@ enum OAuthError {
     IncorrectComponentCount(usize),
 
     // TODO could probably collect this more specific error on all of these
-    InvalidBase64,
-    InvalidStateKey,
     DecryptionFailure,
+    InvalidBase64(base64::DecodeError),
+    InvalidStateKey,
     InvalidContent,
 }
 
@@ -130,24 +129,24 @@ impl Error for OAuthError {
         use self::OAuthError::*;
 
         match *self {
+            DecryptionFailure => "failed to authenticate or decrypt the state",
             IncorrectComponentCount(_) => "returned state component had an incorrect number of entries",
-            InvalidBase64 => "part of the state had invalid web safe base64",
-            InvalidStateKey => "an error occurred generating the key for the state",
-            DecryptionFailure => "failed to properly decrypt the state",
-            InvalidContent => "decrypted content wasn't good",
+            InvalidBase64(_) => "the state had invalid base64",
+            InvalidStateKey => "an error occurred building the state encryption key",
+            InvalidContent => "decrypted bytes couldn't be converted to a valid string",
         }
     }
 }
 
 impl fmt::Display for OAuthError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use self::OAuthError::*;
+        write!(f, "{}", self.description())
+    }
+}
 
-        match *self {
-            IncorrectComponentCount(count) => write!(f, "Returned state had {} components instead of the expected 2", count),
-            InvalidBase64 => write!(f, "One of the returned state components wasn't valid web-base64"),
-            _ => write!(f, "A weird OAuth error occurred: {}", self.description()),
-        }
+impl From<base64::DecodeError> for OAuthError {
+    fn from(err: base64::DecodeError) -> OAuthError {
+        OAuthError::InvalidBase64(err)
     }
 }
 
@@ -163,24 +162,22 @@ fn decrypt_callback_state(state: &str, key: &[u8]) -> Result<String, OAuthError>
 
     let nonce = match base64::decode_config(&components[0], base64::URL_SAFE_NO_PAD) {
         Ok(nonce) => nonce,
-        Err(_) => return Err(OAuthError::InvalidBase64),
+        Err(e) => return Err(OAuthError::from(e)),
     };
 
     let mut enc_data = match base64::decode_config(&components[1], base64::URL_SAFE_NO_PAD) {
         Ok(enc_data) => enc_data,
-        Err(_) => return Err(OAuthError::InvalidBase64),
+        Err(e) => return Err(OAuthError::from(e)),
     };
 
-    // TODO: This needs to be more specific
+    // The ring crate does not provide a specific error implementation so we don't need to be more
+    // specific than this.
     let opening_key = match aead::OpeningKey::new(&aead::CHACHA20_POLY1305, &key[..]) {
         Ok(key) => key,
         Err(_) => return Err(OAuthError::InvalidStateKey),
     };
 
-    // Unused but mandatory
-    let additional_data: [u8; 0] = [];
-
-    let decrypted_state = match aead::open_in_place(&opening_key, &nonce, &additional_data, 0, &mut enc_data) {
+    let decrypted_state = match aead::open_in_place(&opening_key, &nonce, &[], 0, &mut enc_data) {
         Ok(state) => state,
         Err(_) => return Err(OAuthError::DecryptionFailure),
     };
