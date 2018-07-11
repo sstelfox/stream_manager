@@ -4,7 +4,6 @@ extern crate base64;
 extern crate dotenv;
 extern crate env_logger;
 extern crate hyper;
-extern crate rand;
 extern crate ring;
 extern crate url;
 
@@ -19,8 +18,7 @@ use actix_web::{middleware, server, App, HttpResponse, HttpRequest, Query, Resul
 use actix_web::middleware::session::{CookieSessionBackend, SessionStorage, RequestSession};
 use dotenv::dotenv;
 use url::Url;
-use rand::prelude::*;
-use ring::aead;
+use ring::aead::{open_in_place, seal_in_place, CHACHA20_POLY1305, OpeningKey, SealingKey};
 use ring::rand::{SecureRandom, SystemRandom};
 use std::convert::From;
 use std::error::Error;
@@ -53,37 +51,34 @@ fn login_redirect(req: HttpRequest<AppState>) -> Result<HttpResponse> {
 
     let callback_url = req.url_for_static("callback")?;
 
-    // TODO: I may want to use the SystemRandom for this as well, but it's probably fine
-    let auth_nonce: String = rand::thread_rng().sample_iter(&rand::distributions::Alphanumeric).take(12).collect();
-    // TODO: Need to handle this failure potential
-    req.session().set("auth_nonce", auth_nonce.clone())?;
-
-    let mut state = b"signed-data".to_vec();
-    // Need to make room for the signature in the structure
-    for _ in 0..aead::CHACHA20_POLY1305.tag_len() { state.push(0); }
-
-    // Generate a fresh encryption nonce, this must be separate from the auth_nonce
-    let mut nonce = vec![0; 12];
+    // Nonce used to validate the final user token is being connected to the browser session that
+    // initially requested and was redirected to the authentication endpoint.
     let rand = SystemRandom::new();
-    rand.fill(&mut nonce).unwrap();
+    let mut nonce: [u8; 12] = [0; 12];
+    if let Err(e) = rand.fill(&mut nonce) {
+        error!("Unable to fill nonce with random data: {}", e);
+        return Ok(HttpResponse::InternalServerError().finish());
+    }
+    let nonce = base64::encode_config(&nonce, base64::URL_SAFE_NO_PAD);
 
-    let encoded_nonce = base64::encode_config(&nonce, base64::URL_SAFE_NO_PAD);
+    if let Err(e) = req.session().set("auth_nonce", nonce.clone()) {
+        error!("Unable to set the auth_nonce on the session: {}", e);
+        return Ok(HttpResponse::InternalServerError().finish());
+    }
 
     // Generate the key we're going to use for sealing
     let raw_key = req.state().session_key.as_bytes();
 
-    encrypt_callback_state(&String::from("signed-data"), &raw_key.clone(), auth_nonce.clone().as_bytes()).unwrap();
-
-    let sealing_key = aead::SealingKey::new(&aead::CHACHA20_POLY1305, &raw_key[..]).unwrap();
-
-    aead::seal_in_place(&sealing_key, &nonce, &[], &mut state, aead::CHACHA20_POLY1305.tag_len()).unwrap();
-    let safe_state = vec![
-        encoded_nonce,
-        base64::encode_config(&state, base64::URL_SAFE_NO_PAD),
-    ].join(".");
+    let safe_state = match encrypt_callback_state(&String::from("signed-data"), &raw_key) {
+        Ok(state) => state,
+        Err(e) => {
+            error!("Unable to encrypt the callback state: {}", e);
+            return Ok(HttpResponse::InternalServerError().finish());
+        }
+    };
 
     let auth_url = Url::parse_with_params("https://id.twitch.tv/oauth2/authorize",
-        &[("client_id", req.state().twitch_client_id.clone()), ("nonce", auth_nonce.to_string()),
+        &[("client_id", req.state().twitch_client_id.clone()), ("nonce", nonce),
           ("redirect_uri", callback_url.as_str().to_string()), ("response_type", "code".to_string()),
           ("scope", "openid channel_editor chat_login".to_string()), ("state", safe_state)]
       )?;
@@ -118,13 +113,13 @@ struct CallbackInfo {
 
 #[derive(Debug)]
 enum OAuthError {
-    IncorrectComponentCount(usize),
-
-    // TODO could probably collect this more specific error on all of these
     DecryptionFailure,
+    EncryptionFailure,
+    IncorrectComponentCount(usize),
     InvalidBase64(base64::DecodeError),
-    InvalidStateKey,
     InvalidContent,
+    InvalidStateKey,
+    NoEntropyAvailable
 }
 
 impl Error for OAuthError {
@@ -133,10 +128,12 @@ impl Error for OAuthError {
 
         match *self {
             DecryptionFailure => "failed to authenticate or decrypt the state",
+            EncryptionFailure => "failed to encrypt the provided state",
             IncorrectComponentCount(_) => "returned state component had an incorrect number of entries",
             InvalidBase64(_) => "the state had invalid base64",
             InvalidStateKey => "an error occurred building the state encryption key",
             InvalidContent => "decrypted bytes couldn't be converted to a valid string",
+            NoEntropyAvailable => "system was lacking entropy required to fill a data structure",
         }
     }
 }
@@ -175,12 +172,12 @@ fn decrypt_callback_state(state: &str, key: &[u8]) -> Result<String, OAuthError>
 
     // The ring crate does not provide a specific error implementation so we don't need to be more
     // specific than this.
-    let opening_key = match aead::OpeningKey::new(&aead::CHACHA20_POLY1305, &key[..]) {
+    let opening_key = match OpeningKey::new(&CHACHA20_POLY1305, &key[..]) {
         Ok(key) => key,
         Err(_) => return Err(OAuthError::InvalidStateKey),
     };
 
-    let decrypted_state = match aead::open_in_place(&opening_key, &nonce, &[], 0, &mut enc_data) {
+    let decrypted_state = match open_in_place(&opening_key, &nonce, &[], 0, &mut enc_data) {
         Ok(state) => state,
         Err(_) => return Err(OAuthError::DecryptionFailure),
     };
@@ -191,18 +188,48 @@ fn decrypt_callback_state(state: &str, key: &[u8]) -> Result<String, OAuthError>
     };
 }
 
-fn encrypt_callback_state(_state: &str, _key: &[u8], _nonce: &[u8]) -> Result<String, OAuthError> {
-    Ok(String::from("testing"))
+fn encrypt_callback_state(state: &str, key: &[u8]) -> Result<String, OAuthError> {
+    let rand = SystemRandom::new();
+    let mut nonce: [u8; 12] = [0; 12];
+    if let Err(_) = rand.fill(&mut nonce) {
+        return Err(OAuthError::NoEntropyAvailable);
+    }
+    let encoded_nonce = base64::encode_config(&nonce, base64::URL_SAFE_NO_PAD);
+
+    let mut padded_state = state.as_bytes().to_vec();
+    for _ in 0..CHACHA20_POLY1305.tag_len() { padded_state.push(0); }
+
+    let sealing_key = match SealingKey::new(&CHACHA20_POLY1305, &key) {
+        Ok(key) => key,
+        Err(_) => return Err(OAuthError::InvalidStateKey),
+    };
+
+    if let Err(_) = seal_in_place(&sealing_key, &nonce, &[], &mut padded_state, CHACHA20_POLY1305.tag_len()) {
+        return Err(OAuthError::EncryptionFailure);
+    };
+
+    let safe_state = vec![
+        encoded_nonce,
+        base64::encode_config(&padded_state, base64::URL_SAFE_NO_PAD),
+    ].join(".");
+
+    Ok(safe_state)
 }
 
 fn oauth_callback(data: (Query<CallbackInfo>, State<AppState>)) -> Result<HttpResponse> {
     let (callback, app_state) = data;
 
-    let state_string = decrypt_callback_state(&callback.state, app_state.session_key.as_bytes());
+    let state_string = match decrypt_callback_state(&callback.state, app_state.session_key.as_bytes()) {
+        Ok(state_string) => state_string,
+        Err(e) => {
+            error!("Failed to decrypt callback state: {}", e);
+            return Ok(HttpResponse::BadRequest().body("This was a bad request. Bad user.\n"));
+        }
+    };
 
     // TODO: when this state is meaningful I should do a better check. This is still useful as it
     // stands now.
-    if state_string.unwrap() != "signed-data" {
+    if state_string != "signed-data" {
         // This was malformed, the decryption should have caught any modifications. Replays are
         // possible, but the internal contents should eventually have timestamp and user's session
         // ID in.
