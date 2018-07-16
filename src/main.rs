@@ -62,15 +62,6 @@ fn login_redirect(req: HttpRequest<AppState>) -> Result<HttpResponse> {
 
     let callback_url = req.url_for_static("callback")?;
 
-    // Unique identifier for this user's browser session, will be used for the lifetime of the
-    // browser's login session
-    let session_id = rand_nonce();
-    let session_id = base64::encode_config(&session_id, base64::URL_SAFE_NO_PAD);
-    if let Err(e) = req.session().set("sid", session_id) {
-        error!("Unable to set the session ID: {}", e);
-        return Ok(HttpResponse::InternalServerError().finish());
-    }
-
     // Nonce used to validate the final user token is being connected to the browser session that
     // initially requested and was redirected to the authentication endpoint.
     let nonce = rand_nonce();
@@ -84,7 +75,6 @@ fn login_redirect(req: HttpRequest<AppState>) -> Result<HttpResponse> {
     // other browsers.
     let _int_state = InternalState {
         address: req.connection_info().remote().unwrap().to_string(),
-        session_id: req.session().get::<String>("sid").unwrap().unwrap(),
     };
 
     // Pull in the key we're going to use for sealing
@@ -135,7 +125,6 @@ struct CallbackInfo {
 #[derive(Debug, Deserialize, Serialize)]
 struct InternalState {
     address: String,
-    session_id: String,
 }
 
 #[derive(Debug)]
