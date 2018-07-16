@@ -45,31 +45,52 @@ fn index(req: HttpRequest<AppState>) -> &'static str {
     "First page\n"
 }
 
+fn rand_nonce() -> [u8; 12] {
+    let rand = SystemRandom::new();
+    let mut nonce: [u8; 12] = [0; 12];
+
+    if let Err(_e) = rand.fill(&mut nonce) {
+        panic!("No entropy is available for nonce generation");
+    }
+
+    nonce
+}
+
 fn login_redirect(req: HttpRequest<AppState>) -> Result<HttpResponse> {
     // TODO: Check if the user is already logged in and choose to redirect them to a reasonable
     // logged in path instead of doing this
 
     let callback_url = req.url_for_static("callback")?;
 
-    // Nonce used to validate the final user token is being connected to the browser session that
-    // initially requested and was redirected to the authentication endpoint.
-    let rand = SystemRandom::new();
-    let mut nonce: [u8; 12] = [0; 12];
-    if let Err(e) = rand.fill(&mut nonce) {
-        error!("Unable to fill nonce with random data: {}", e);
+    // Unique identifier for this user's browser session, will be used for the lifetime of the
+    // browser's login session
+    let session_id = rand_nonce();
+    let session_id = base64::encode_config(&session_id, base64::URL_SAFE_NO_PAD);
+    if let Err(e) = req.session().set("sid", session_id) {
+        error!("Unable to set the session ID: {}", e);
         return Ok(HttpResponse::InternalServerError().finish());
     }
-    let nonce = base64::encode_config(&nonce, base64::URL_SAFE_NO_PAD);
 
+    // Nonce used to validate the final user token is being connected to the browser session that
+    // initially requested and was redirected to the authentication endpoint.
+    let nonce = rand_nonce();
+    let nonce = base64::encode_config(&nonce, base64::URL_SAFE_NO_PAD);
     if let Err(e) = req.session().set("auth_nonce", nonce.clone()) {
         error!("Unable to set the auth_nonce on the session: {}", e);
         return Ok(HttpResponse::InternalServerError().finish());
     }
 
-    // Generate the key we're going to use for sealing
+    // Generate some information we can use to ensure we don't hand out session identifiers to
+    // other browsers.
+    let _int_state = InternalState {
+        address: req.connection_info().remote().unwrap().to_string(),
+        session_id: req.session().get::<String>("sid").unwrap().unwrap(),
+    };
+
+    // Pull in the key we're going to use for sealing
     let raw_key = req.state().session_key.as_bytes();
 
-    let safe_state = match encrypt_callback_state(&String::from("signed-data"), &raw_key) {
+    let safe_state = match encrypt_callback_state("signed-data", &raw_key) {
         Ok(state) => state,
         Err(e) => {
             error!("Unable to encrypt the callback state: {}", e);
@@ -111,6 +132,12 @@ struct CallbackInfo {
     success: Option<CallbackSuccess>,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct InternalState {
+    address: String,
+    session_id: String,
+}
+
 #[derive(Debug)]
 enum OAuthError {
     DecryptionFailure,
@@ -119,7 +146,6 @@ enum OAuthError {
     InvalidBase64(base64::DecodeError),
     InvalidContent,
     InvalidStateKey,
-    NoEntropyAvailable
 }
 
 impl Error for OAuthError {
@@ -133,7 +159,6 @@ impl Error for OAuthError {
             InvalidBase64(_) => "the state had invalid base64",
             InvalidStateKey => "an error occurred building the state encryption key",
             InvalidContent => "decrypted bytes couldn't be converted to a valid string",
-            NoEntropyAvailable => "system was lacking entropy required to fill a data structure",
         }
     }
 }
@@ -189,11 +214,7 @@ fn decrypt_callback_state(state: &str, key: &[u8]) -> Result<String, OAuthError>
 }
 
 fn encrypt_callback_state(state: &str, key: &[u8]) -> Result<String, OAuthError> {
-    let rand = SystemRandom::new();
-    let mut nonce: [u8; 12] = [0; 12];
-    if let Err(_) = rand.fill(&mut nonce) {
-        return Err(OAuthError::NoEntropyAvailable);
-    }
+    let nonce = rand_nonce();
     let encoded_nonce = base64::encode_config(&nonce, base64::URL_SAFE_NO_PAD);
 
     let mut padded_state = state.as_bytes().to_vec();
@@ -216,9 +237,7 @@ fn encrypt_callback_state(state: &str, key: &[u8]) -> Result<String, OAuthError>
     Ok(safe_state)
 }
 
-fn oauth_callback(data: (Query<CallbackInfo>, State<AppState>)) -> Result<HttpResponse> {
-    let (callback, app_state) = data;
-
+fn oauth_callback((callback, app_state): (Query<CallbackInfo>, State<AppState>)) -> Result<HttpResponse> {
     let state_string = match decrypt_callback_state(&callback.state, app_state.session_key.as_bytes()) {
         Ok(state_string) => state_string,
         Err(e) => {
