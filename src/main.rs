@@ -5,6 +5,7 @@ extern crate dotenv;
 extern crate env_logger;
 extern crate hyper;
 extern crate ring;
+extern crate serde_json;
 extern crate url;
 
 #[macro_use]
@@ -124,7 +125,12 @@ struct CallbackInfo {
 
 #[derive(Debug, Deserialize, Serialize)]
 struct InternalState {
+    #[serde(rename = "a")]
     address: String,
+
+    // TODO:
+    //#[serde(rename = "ts")]
+    //time_stamp: usize, // Maybe some other data type?
 }
 
 #[derive(Debug)]
@@ -231,21 +237,35 @@ fn oauth_callback((callback, app_state): (Query<CallbackInfo>, State<AppState>))
         Ok(state_string) => state_string,
         Err(e) => {
             error!("Failed to decrypt callback state: {}", e);
-            return Ok(HttpResponse::BadRequest().body("This was a bad request. Bad user.\n"));
+            return Ok(HttpResponse::BadRequest().finish());
         }
     };
 
-    // TODO: when this state is meaningful I should do a better check. This is still useful as it
-    // stands now.
-    if state_string != "signed-data" {
-        // This was malformed, the decryption should have caught any modifications. Replays are
-        // possible, but the internal contents should eventually have timestamp and user's session
-        // ID in.
-        return Ok(HttpResponse::BadRequest().body("This was a bad request. Bad user.\n"));
-    }
+    // It seems incredibly unlikely this branch would ever fail as we've already authenticated it
+    // but you don't take risks with your authentication processes.
+    let _returned_state : InternalState = match serde_json::from_str(&state_string) {
+        Ok(state) => state,
+        Err(e) => {
+            error!("Internal state wasn't a valid object: {}", e);
+            return Ok(HttpResponse::BadRequest().finish());
+        },
+    };
+
+    // Verify we're still talking to the same client at the same address as the initial redirect
+    //if returned_state != req.connection_info().remote().unwrap().to_string() {
+    //    error!("IP address listed in internal state did not match: {}", returned_state.address);
+    //    return Ok(HttpResponse::BadRequest().finish());
+    //}
+
+    // TODO: Put a time limit on the individual responses
+    //if (returned_state.time_stamp + 300) < now {
+    //  error!("Received an oauth callback with a state older than 5 minutes ago");
+    //  return Ok(HttpResponse::BadRequest().finish());
+    //}
 
     if callback.error.is_some() {
-        return Ok(HttpResponse::Unauthorized().body("You didn't grant us permission\n"));
+        // TODO: Make the request to get the user's token
+        return Ok(HttpResponse::Unauthorized().finish());
     }
 
     if callback.success.is_some() {
@@ -255,7 +275,7 @@ fn oauth_callback((callback, app_state): (Query<CallbackInfo>, State<AppState>))
 
     // This was neither an error or a success, but had at least a 'state' attribute otherwise this
     // handler wouldn't have been called at all.
-    Ok(HttpResponse::BadRequest().body("This was a bad request. Bad user.\n"))
+    Ok(HttpResponse::BadRequest().finish())
 }
 
 #[derive(Clone, Debug)]
